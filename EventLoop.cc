@@ -30,6 +30,7 @@ __thread EventLoop* t_loopInThisThread = 0;
 
 const int kPollTimeMs = 10000;
 
+/* 创建 eventfd */
 int createEventfd()
 {
   int evtfd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -73,7 +74,7 @@ EventLoop::EventLoop()
     poller_(Poller::newDefaultPoller(this)),
     timerQueue_(new TimerQueue(this)),
     wakeupFd_(createEventfd()),
-    wakeupChannel_(new Channel(this, wakeupFd_)),
+    wakeupChannel_(new Channel(this, wakeupFd_)), //创建的eventfd 对应的channel
     currentActiveChannel_(NULL)
 {
   LOG_DEBUG << "EventLoop created " << this << " in thread " << threadId_;
@@ -87,9 +88,9 @@ EventLoop::EventLoop()
     t_loopInThisThread = this;
   }
   wakeupChannel_->setReadCallback(
-      boost::bind(&EventLoop::handleRead, this));
+      boost::bind(&EventLoop::handleRead, this)); //设置读事件回调
   // we are always reading the wakeupfd
-  wakeupChannel_->enableReading();
+  wakeupChannel_->enableReading(); //给 wakeupFd_ 注册可读事件
 }
 
 EventLoop::~EventLoop()
@@ -131,7 +132,7 @@ void EventLoop::loop()
     }
     currentActiveChannel_ = NULL;
     eventHandling_ = false;
-    doPendingFunctors();
+    doPendingFunctors();    //执行 pendingFunctors_ 中的任务回调
   }
 
   LOG_TRACE << "EventLoop " << this << " stop looping";
@@ -152,10 +153,12 @@ void EventLoop::quit()
 
 void EventLoop::runInLoop(const Functor& cb)
 {
+    /* 如果在当前IO线程调用这个函数，回调会同步进行*/
   if (isInLoopThread())
   {
     cb();
   }
+  /* 否则，cb 会被加入到队列，IO线程会被唤醒来执行回调*/
   else
   {
     queueInLoop(cb);
@@ -166,12 +169,20 @@ void EventLoop::queueInLoop(const Functor& cb)
 {
   {
   MutexLockGuard lock(mutex_);
-  pendingFunctors_.push_back(cb);
+  pendingFunctors_.push_back(cb);   //将cb放入队列
   }
 
+  /* 
+   * 如果调用queueloop的线程不是IO线程
+   * 如果是IO线程调用queueloop,而此时正在调用pendingfunctors
+   * 则唤醒IO线程，第二点请看 doPendingFunctors()函数 
+   * 
+   * 当前IO线程的事件回调中调用queueInLoop不需要唤醒
+   * 因为接下来马上就会执行 doPendingFunctors()
+   */
   if (!isInLoopThread() || callingPendingFunctors_)
   {
-    wakeup();
+    wakeup(); 
   }
 }
 
@@ -181,17 +192,20 @@ size_t EventLoop::queueSize() const
   return pendingFunctors_.size();
 }
 
+/* 在时间戳为 time 的时刻执行，0.0 表示不重复 */
 TimerId EventLoop::runAt(const Timestamp& time, const TimerCallback& cb)
 {
   return timerQueue_->addTimer(cb, time, 0.0);
 }
 
+/* 延迟 delay 时间执行 */
 TimerId EventLoop::runAfter(double delay, const TimerCallback& cb)
 {
   Timestamp time(addTime(Timestamp::now(), delay));
   return runAt(time, cb);
 }
 
+/* 重复定时器，时间间隔为 interval */
 TimerId EventLoop::runEvery(double interval, const TimerCallback& cb)
 {
   Timestamp time(addTime(Timestamp::now(), interval));
@@ -243,6 +257,7 @@ TimerId EventLoop::runEvery(double interval, TimerCallback&& cb)
 }
 #endif
 
+/* 注销定时器，直接调用 TimerQueue::cancel() */
 void EventLoop::cancel(TimerId timerId)
 {
   return timerQueue_->cancel(timerId);
@@ -281,6 +296,7 @@ void EventLoop::abortNotInLoopThread()
             << ", current thread id = " <<  CurrentThread::tid();
 }
 
+/* wakeup 就是向wakeupFd_ 写数据*/
 void EventLoop::wakeup()
 {
   uint64_t one = 1;
@@ -290,7 +306,12 @@ void EventLoop::wakeup()
     LOG_ERROR << "EventLoop::wakeup() writes " << n << " bytes instead of 8";
   }
 }
+/* 
+ * eventfd 的分析可以看我的博客:
+ *       blog.csdn.net/tanswer_/article/details/79008322
+ */
 
+/* 从wakeupFd_ 读数据 */
 void EventLoop::handleRead()
 {
   uint64_t one = 1;
@@ -301,21 +322,33 @@ void EventLoop::handleRead()
   }
 }
 
+/* 执行队列中的任务回调*/
 void EventLoop::doPendingFunctors()
 {
   std::vector<Functor> functors;
   callingPendingFunctors_ = true;
 
   {
+      /*
+       * 没有在临界区依次调用 Functor,
+       * 而是把回调列表swap()到局部变量 functors 中
+       * 一方面减小了临界区的长度，不会阻塞其他线程调用queueInLoop()
+       * 另一方面也避免了死锁，因为Functor 可能会再调用 queueInLoop() 
+       * 而且此时queueInLoop()就必须wakeup()，否则这些新加的cb就不能被及时调用了
+       */
   MutexLockGuard lock(mutex_);
   functors.swap(pendingFunctors_);
   }
 
   for (size_t i = 0; i < functors.size(); ++i)
   {
-    functors[i]();
+    functors[i]();  //依次执行任务回调
   }
   callingPendingFunctors_ = false;
+  /* 
+   * muduo 没有反复执行doPendingFunctors()直到pendingFunctors_为空
+   * 否则线程可能陷入死循环，无法处理IO事件
+   */
 }
 
 void EventLoop::printActiveChannels() const

@@ -73,14 +73,8 @@ class EventLoop : boost::noncopyable
 
   int64_t iteration() const { return iteration_; }
 
-  /// Runs callback immediately in the loop thread.
-  /// It wakes up the loop, and run the cb.
-  /// If in the same loop thread, cb is run within the function.
-  /// Safe to call from other threads.
   void runInLoop(const Functor& cb);
-  /// Queues callback in the loop thread.
-  /// Runs after finish pooling.
-  /// Safe to call from other threads.
+  
   void queueInLoop(const Functor& cb);
 
   size_t queueSize() const;
@@ -92,27 +86,16 @@ class EventLoop : boost::noncopyable
 
   // timers
 
-  ///
-  /// Runs callback at 'time'.
-  /// Safe to call from other threads.
-  ///
   //在某个绝对时间点执行定时回调
   TimerId runAt(const Timestamp& time, const TimerCallback& cb);
   ///
-  /// Runs callback after @c delay seconds.
-  /// Safe to call from other threads.
   ///
   //相对时间 执行定时回调
   TimerId runAfter(double delay, const TimerCallback& cb);
   ///
-  /// Runs callback every @c interval seconds.
-  /// Safe to call from other threads.
-  ///
   //每隔interval执行定时回调
   TimerId runEvery(double interval, const TimerCallback& cb);
   ///
-  /// Cancels the timer.
-  /// Safe to call from other threads.
   ///
   //删除某个定时器
   void cancel(TimerId timerId);
@@ -161,7 +144,7 @@ class EventLoop : boost::noncopyable
  private:
   /* 在不拥有EventLoop 线程中终止 */
   void abortNotInLoopThread();
-  /* timerfd 上可读事件回调 */
+  /* wakeupFd_ 上可读事件回调 */
   void handleRead();  // waked up
   /* 执行队列pendingFunctors 中的用户任务回调 */
   void doPendingFunctors();
@@ -173,16 +156,17 @@ class EventLoop : boost::noncopyable
   bool looping_; /* atomic */ //运行标志
   bool quit_; /* atomic and shared between threads, okay on x86, I guess. */ //退出循环标志
   bool eventHandling_; /* atomic */
-  bool callingPendingFunctors_; /* atomic *///是否有用户任务回调标志
+  bool callingPendingFunctors_; /* atomic *///是否正在执行用户任务回调
   int64_t iteration_;
   const pid_t threadId_;    //EventLoop 的附属线程ID
   Timestamp pollReturnTime_;
   boost::scoped_ptr<Poller> poller_;        //多路复用类Poller
   boost::scoped_ptr<TimerQueue> timerQueue_;//定时器队列用于存放定时器
-  int wakeupFd_;    //调用eventfd返回的eventfd,用于唤醒EventLoop所在的线程
+  
+  int wakeupFd_;    //eventfd返回的eventfd,用于唤醒EventLoop所在的线程
   // unlike in TimerQueue, which is an internal class,
   // we don't expose Channel to client.
-  // 通过wakeuoChannel_观察wakeupFd_上的可读事件
+  // 通过wakeupChannel_观察wakeupFd_上的可读事件
   // 当可读表明需要唤醒EventLoop所在线程执行用户回调
   boost::scoped_ptr<Channel> wakeupChannel_;
   boost::any context_;
@@ -192,7 +176,7 @@ class EventLoop : boost::noncopyable
   Channel* currentActiveChannel_;   //当前活跃的事件
 
   mutable MutexLock mutex_;
-  std::vector<Functor> pendingFunctors_; // @GuardedBy mutex_ //用户任务回调队列
+  std::vector<Functor> pendingFunctors_; // @GuardedBy mutex_ //存放用户任务回调
 };
 
 }
